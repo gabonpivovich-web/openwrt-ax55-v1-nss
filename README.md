@@ -1,0 +1,156 @@
+# OpenWrt with NSS offload — TP-Link Archer AX55 v1 (IPQ5018)
+
+Everything needed to build @kuncy7's [`ipq50xx-rebase`][branch] for the Archer
+AX55 v1, plus a prebuilt image. The board is in OpenWrt main; what is here is
+the part that is not: the NSS data path over a Realtek switch.
+
+[branch]: https://github.com/kuncy7/openwrt-nss-edma/tree/ipq50xx-rebase
+
+**Forum thread:** <https://forum.openwrt.org/t/253014>
+
+## Hardware
+
+| | |
+|---|---|
+| SoC | Qualcomm IPQ5018 |
+| RAM | 512 MB DDR3 |
+| Flash | 128 MB SPI-NAND (ESMT F50L1G41LB) |
+| Switch | Realtek RTL8367S-VB, **2.5G** HSGMII trunk on GMAC1 |
+| Ports | WAN + 4× LAN, all on the switch |
+| Wi-Fi 2.4 GHz | IPQ5018 integrated |
+| Wi-Fi 5 GHz | QCN6122 |
+
+## Measured
+
+| | Mbit/s | router CPU |
+|---|---|---|
+| wired, routed both ways | 943 | ~2% |
+| Wi-Fi 5 GHz (160 MHz, HE-NSS 2, −50 dBm), AP → STA | 915 | 1–3% |
+| Wi-Fi 5 GHz, STA → AP | 818 | 1–3% |
+
+Both radios run on wifili. Stock TP-Link firmware reaches the same figures.
+
+## What is in here
+
+```
+package/kernel/rtl8367s-nss/          the switch re-arm module
+target/linux/generic/pending-6.18/    RTL8367S-VB family D support
+target/linux/qualcommax/              board DTS and board files
+apply.sh                              copies the above into a checked-out tree
+```
+
+### `rtl8367s-nss`
+
+The NSS firmware parses 802.1q but not the Realtek CPU tag, so a board that
+wants the offload has to give up DSA and drive the switch as a plain trunk.
+Unbinding `rtl8365mb` is the easy half; the module is the other half, putting
+back the force word, the VLAN table, the PVIDs, the egress mode, the learning
+limit and the front PHYs — everything the driver takes with it on the way out.
+It is the Realtek counterpart to `qca8337-nss` in the branch.
+
+It also registers a display-only `net_device` per front jack, so LuCI's port
+panel, the netdev LED triggers and the per-port counters have something to
+read. Those devices carry link state, negotiated speed and the switch's MIB
+counters; they cannot carry a frame.
+
+### The `930-*` patches
+
+RTL8367S-VB (family D) support for `rtl8365mb`, by **Mieczyslaw Nalewaj
+(@namiltd)**, taken unmodified from his [`Realtek_DSA2`][nam] branch. Family D
+moved the speed field, dropped the MC table, narrowed the FID mask and needs a
+different RGMII mux and a SerDes re-latch. Not mine — if they land upstream,
+drop them from here.
+
+[nam]: https://github.com/namiltd/openwrt/tree/Realtek_DSA2/target/linux/generic/pending-6.18
+
+### The board DTS
+
+The one thing worth reading if you have a different board: both `fixed-link`
+nodes on the trunk carry `pause`.
+
+```
+&gmac1 {
+	fixed-link {
+		speed = <2500>;
+		full-duplex;
+		pause;          /* <- this */
+	};
+};
+```
+
+Without it phylink resolves the link as pauseless, `dwmac1000_flow_ctrl()`
+never sets `GMAC_FLOW_CTRL_RFE`, and the MAC discards the pause frames the
+switch is sending it — the switch then drops ~13% of a 400 Mbit/s stream on
+the 2.5G→1G step, with every NSS counter clean. It cost 466 Mbit/s of upstream
+Wi-Fi throughput here and took two days to find. Worth adding to any
+`fixed-link` faster than the front ports.
+
+## Building
+
+```sh
+git clone -b ipq50xx-rebase https://github.com/kuncy7/openwrt-nss-edma.git
+cd openwrt-nss-edma
+
+cp feeds.conf.default feeds.conf
+echo "src-git nss https://github.com/kuncy7/nss-packages.git;ipq50xx-rebase" >> feeds.conf
+./scripts/feeds update -a && ./scripts/feeds install -a
+./scripts/feeds list -r nss | grep -q qca-nss-drv && echo "nss feed OK"
+
+/path/to/this/repo/apply.sh .
+
+make menuconfig    # Target: Qualcomm Atheros IPQ50xx, Profile: TP-Link Archer AX55 v1
+make -j$(nproc)
+```
+
+`apply.sh` copies the files and prints what it changed. The board table entry,
+the `DEVICE_DTS` line and the LuCI port wiring are patched into the branch's
+own files, so re-run it after every `git pull`.
+
+## Flashing
+
+The board is supported in OpenWrt main, so the usual route applies: TFTP an
+initramfs from U-Boot, then `sysupgrade`. Use `-n` only if you want the
+defaults back; without it the Wi-Fi config survives.
+
+After a `-n` flash the port netdevs need their uci entries, which no
+`uci-defaults` script can write — both `board.d` and `uci-defaults` run before
+netifd generates `/etc/config/network` from `board.json`:
+
+```sh
+for p in lan1 lan2 lan3 lan4; do uci add_list network.@device[0].ports=$p; done
+uci set network.brwan=device
+uci set network.brwan.name='br-wan'
+uci set network.brwan.type='bridge'
+uci add_list network.brwan.ports='eth0.2'
+uci add_list network.brwan.ports='wan'
+uci set network.wan.device='br-wan'
+uci set network.wan6.device='br-wan'
+uci commit network
+reboot
+```
+
+Without this the ports still show link, speed and counters; they just are not
+coloured by network in the status page.
+
+## Checking the offload
+
+```sh
+cat /sys/kernel/debug/qca-dwmac-nss/status
+# phys_if 1: started dev=eth0 fw_link=up
+# dma_status=00660004 rs=3 ts=6 ...        <- rs=3 ts=6 is the healthy one
+
+grep -E "ipv4_hash_hits|ipv4_create_requests" /sys/kernel/debug/qca-nss-drv/stats/ipv4
+nss_stats | grep -A6 "ATTACH 0"            # the QCN6122 on wifili
+ethtool eth0 | grep -i pause               # link partner advertised: Symmetric
+```
+
+## Credits
+
+- [@kuncy7](https://github.com/kuncy7) — the NSS branch this builds on, and the
+  `qca8337-nss` design the Realtek module follows
+- [@namiltd](https://github.com/namiltd) — RTL8367S-VB family D support
+- OpenWrt, for the board port itself
+
+## Licence
+
+GPL-2.0-only, as the tree it plugs into.

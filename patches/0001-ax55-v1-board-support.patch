@@ -1,0 +1,157 @@
+diff --git a/package/nss/nss-tools/files/nss-dwmac.defaults b/package/nss/nss-tools/files/nss-dwmac.defaults
+index 782a0d13be..8e780715cf 100644
+--- a/package/nss/nss-tools/files/nss-dwmac.defaults
++++ b/package/nss/nss-tools/files/nss-dwmac.defaults
+@@ -54,6 +54,15 @@ nss_dwmac_board_defaults() {
+ 		switch_args='cpu_port=6 ports=0x7e wake_phys=90000.mdio-1:00,90000.mdio-1:01,90000.mdio-1:02,90000.mdio-1:03,90000.mdio-1:04'
+ 		vtu='1:6t,1u,2u,3u,4u;2:6t,5u'
+ 		;;
++	tplink,archer-ax55-v1)
++		# port 6 = CPU (2500base-x), 0 = wan, 1-4 = lan. An
++		# RTL8367S-VB, so rtl8367s-nss re-arms it and carries its own
++		# VLAN and PVID program - switch_args and vtu stay empty.
++		fw_mask='0x2'
++		trunk='eth0'
++		switch_args=''
++		vtu=''
++		;;
+ 	xunison,exigo-hub-d50-5g)
+ 		# WAN is GMAC0's own GE PHY (netdev 'wan'), so GMAC1 - the switch
+ 		# trunk - comes up as eth1 and carries LAN only: port 0 = CPU
+diff --git a/target/linux/qualcommax/config-6.18 b/target/linux/qualcommax/config-6.18
+index 9d93f32a91..640431d3f7 100644
+--- a/target/linux/qualcommax/config-6.18
++++ b/target/linux/qualcommax/config-6.18
+@@ -339,6 +339,7 @@ CONFIG_PHY_PACKAGE=y
+ # CONFIG_PHY_QCOM_EDP is not set
+ # CONFIG_PHY_QCOM_EUSB2_REPEATER is not set
+ # CONFIG_PHY_QCOM_IPQ4019_USB is not set
++# CONFIG_PHY_QCOM_IPQ5018_USB_SS is not set
+ # CONFIG_PHY_QCOM_IPQ806X_SATA is not set
+ # CONFIG_PHY_QCOM_IPQ806X_USB is not set
+ # CONFIG_PHY_QCOM_M31_EUSB is not set
+diff --git a/target/linux/qualcommax/image/ipq50xx.mk b/target/linux/qualcommax/image/ipq50xx.mk
+index 61113fd32b..df34fef226 100644
+--- a/target/linux/qualcommax/image/ipq50xx.mk
++++ b/target/linux/qualcommax/image/ipq50xx.mk
+@@ -207,6 +207,7 @@ define Device/tplink_archer-ax55-v1
+ 	DEVICE_VENDOR := TP-Link
+ 	DEVICE_MODEL := Archer AX55
+ 	DEVICE_VARIANT := v1
++	DEVICE_DTS := ipq5018-tplink-archer-ax55-v1
+ 	DEVICE_DTS_CONFIG := config@mp03.3
+ 	SOC := ipq5018
+ 	BLOCKSIZE := 128k
+@@ -215,8 +216,10 @@ define Device/tplink_archer-ax55-v1
+ 	NAND_SIZE := 128m
+ 	DEVICE_PACKAGES := ath11k-firmware-ipq5018-qcn6122 \
+ 		ipq-wifi-tplink_archer-ax55-v1 \
+-		kmod-dsa-rtl8365mb \
+-		kmod-usb-ledtrig-usbport
++		kmod-dsa-realtek kmod-dsa-rtl8365mb \
++		kmod-nft-offload \
++		kmod-usb-ledtrig-usbport \
++		kmod-rtl8367s-nss
+ ifneq ($(CONFIG_TARGET_ROOTFS_INITRAMFS),)
+ ifeq ($(IB),)
+ 	ARTIFACTS := initramfs-factory.ubi
+diff --git a/target/linux/qualcommax/ipq50xx/base-files/etc/board.d/01_leds b/target/linux/qualcommax/ipq50xx/base-files/etc/board.d/01_leds
+index 0d30aa35c3..45ec183e06 100644
+--- a/target/linux/qualcommax/ipq50xx/base-files/etc/board.d/01_leds
++++ b/target/linux/qualcommax/ipq50xx/base-files/etc/board.d/01_leds
+@@ -45,6 +45,17 @@ xiaomi,ax6000)
+ 	ucidef_set_led_netdev "wan-port-link-top-blue" "WAN-PORT-LINK-TOP-BLUE" "blue:wan" "wan" "link_1000 link_2500"
+ 	ucidef_set_led_netdev "wan-port-link-top-yellow" "WAN-PORT-LINK-TOP-YELLOW" "yellow:wan" "wan" "link_10 link_100"
+ 	;;
++tplink,archer-ax55-v1)
++	# The jack LEDs hang off the switch and never reach the kernel;
++	# these are the case indicators. There are no DSA user ports left
++	# to key on - the switch is a plain 802.1q trunk once
++	# rtl8367s-nss has re-armed it - so LAN and WAN follow the bridge
++	# and the wan VLAN, and rtl8367s-nss drives the link state from
++	# the front PHYs.
++	ucidef_set_led_netdev "wan" "WAN" "orange:wan" "eth0.2" "tx rx"
++	ucidef_set_led_netdev "wlan2g" "WLAN2G" "green:wlan-2ghz" "phy0-ap0" "link tx rx"
++	ucidef_set_led_netdev "wlan5g" "WLAN5G" "green:wlan-5ghz" "phy1-ap0" "link tx rx"
++	;;
+ esac
+ 
+ board_config_flush
+diff --git a/target/linux/qualcommax/ipq50xx/base-files/etc/hotplug.d/firmware/11-ath11k-caldata b/target/linux/qualcommax/ipq50xx/base-files/etc/hotplug.d/firmware/11-ath11k-caldata
+index 281a505f5a..51ef0e1837 100644
+--- a/target/linux/qualcommax/ipq50xx/base-files/etc/hotplug.d/firmware/11-ath11k-caldata
++++ b/target/linux/qualcommax/ipq50xx/base-files/etc/hotplug.d/firmware/11-ath11k-caldata
+@@ -66,6 +66,13 @@ case "$FIRMWARE" in
+ 		ath11k_remove_regdomain
+ 		ath11k_set_macflag
+ 		;;
++	tplink,archer-ax55-v1)
++		caldata_extract "0:ART" 0x1000 0x20000
++		label_mac=$(get_mac_binary "/tmp/tp_data/default-mac" 0)
++		[ -n "$label_mac" ] && ath11k_patch_mac "$(macaddr_add "$label_mac" 2)" 0
++		ath11k_set_macflag
++		ath11k_remove_regdomain
++		;;
+ 	esac
+ 	;;
+ "ath11k/QCN6122/hw1.0/cal-ahb-b00a040.wifi.bin")
+@@ -119,6 +126,13 @@ case "$FIRMWARE" in
+ 		ath11k_remove_regdomain
+ 		ath11k_set_macflag
+ 		;;
++	tplink,archer-ax55-v1)
++		caldata_extract "0:ART" 0x26800 0x20000
++		label_mac=$(get_mac_binary "/tmp/tp_data/default-mac" 0)
++		[ -n "$label_mac" ] && ath11k_patch_mac "$(macaddr_add "$label_mac" 3)" 0
++		ath11k_set_macflag
++		ath11k_remove_regdomain
++		;;
+ 	esac
+ 	;;
+ "ath11k/QCN6122/hw1.0/cal-ahb-b00b040.wifi.bin")
+diff --git a/target/linux/qualcommax/ipq50xx/base-files/lib/upgrade/platform.sh b/target/linux/qualcommax/ipq50xx/base-files/lib/upgrade/platform.sh
+index 009d729363..ad4b563329 100644
+--- a/target/linux/qualcommax/ipq50xx/base-files/lib/upgrade/platform.sh
++++ b/target/linux/qualcommax/ipq50xx/base-files/lib/upgrade/platform.sh
+@@ -264,6 +264,29 @@ platform_do_upgrade() {
+ 		remove_oem_ubi_volume wifi_fw
+ 		nand_do_upgrade "$1"
+ 		;;
++	tplink,archer-ax55-v1)
++		# Dual boot: install into the inactive rootfs/rootfs_1 slot,
++		# then point tp_boot_idx at it. The running slot is left
++		# untouched as a fallback - if the new image fails to load,
++		# TP-Link's U-Boot boots the other slot on its own (only on
++		# load failure though: there is no boot counter, a kernel
++		# that boots and then crashes is not detected).
++		local idx=1
++		CI_UBIPART="rootfs_1"
++		if grep -q 'ubi.mtd=rootfs_1' /proc/cmdline; then
++			idx=0
++			CI_UBIPART="rootfs"
++		fi
++		fw_setenv tp_boot_idx $idx || {
++			echo "failed to set tp_boot_idx $idx"
++			return 1
++		}
++		# a slot last written by TP-Link firmware carries extra
++		# volumes that would leave no room for ours
++		remove_oem_ubi_volume ubi_rootfs
++		remove_oem_ubi_volume tp_data
++		nand_do_upgrade "$1"
++		;;
+ 	*)
+ 		default_do_upgrade "$1"
+ 		;;
+diff --git a/target/linux/qualcommax/ipq50xx/config-default b/target/linux/qualcommax/ipq50xx/config-default
+index 04972c602f..237aa02124 100644
+--- a/target/linux/qualcommax/ipq50xx/config-default
++++ b/target/linux/qualcommax/ipq50xx/config-default
+@@ -10,6 +10,7 @@ CONFIG_NET_DSA_QCA8K_LEDS_SUPPORT=y
+ CONFIG_NET_DSA_TAG_QCA=y
+ CONFIG_NET_PTP_CLASSIFY=y
+ CONFIG_PCS_XPCS=y
++CONFIG_PHY_QCOM_IPQ5018_USB_SS=y
+ CONFIG_PHY_QCOM_M31_USB=y
+ CONFIG_PHY_QCOM_UNIPHY_PCIE_28LP=y
+ CONFIG_PHY_QCOM_UNIPHY_USB_22ULL=y

@@ -1,0 +1,9 @@
+#!/bin/sh
+# The bench upstream router already owns 192.168.1.0/24, and having the same
+# subnet on both sides of a router makes its routing table ambiguous: the
+# WAN address answers, the LAN address answers, and traffic between them
+# does not go where either side expects.
+[ "$(board_name)" = "tplink,archer-ax55-v1" ] || exit 0
+uci -q set network.lan.ipaddr='192.168.2.1/24'
+uci -q commit network
+exit 0

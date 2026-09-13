@@ -1,0 +1,28 @@
+#!/bin/sh /etc/rc.common
+# Hand the RTL8367S-VB over from DSA to a plain 802.1q trunk: the NSS
+# firmware parses 802.1q natively but not the Realtek CPU tag, and DSA
+# takes the VLAN table and the port egress mode with it on the way out.
+# Runs before netifd builds eth0.<vid> and before nss arms the firmware.
+START=15
+
+# get_mac_binary, for the port netdevs' base address
+. /lib/functions/system.sh
+
+SWDEV=90000.mdio-1:1d
+VLANS="1:1u,2u,3u,4u,6t;2:0u,6t"
+PVIDS="1:1,2:1,3:1,4:1,0:2"
+
+start() {
+	[ "$(board_name)" = "tplink,archer-ax55-v1" ] || return 0
+
+	if [ -e "/sys/bus/mdio_bus/drivers/rtl8365mb-mdio/$SWDEV" ]; then
+		echo "$SWDEV" > /sys/bus/mdio_bus/drivers/rtl8365mb-mdio/unbind
+		sleep 2
+	fi
+
+	insmod rtl8367s_nss vlans="$VLANS" pvids="$PVIDS" \
+		base_mac="$(get_mac_binary /tmp/tp_data/default-mac 0 2>/dev/null)" 2>/dev/null
+
+	# the module returns -EAGAIN by design: its work is already done
+	return 0
+}
