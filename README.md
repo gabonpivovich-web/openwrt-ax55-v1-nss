@@ -13,8 +13,8 @@ the part that is not: the NSS data path over a Realtek switch.
 | | |
 |---|---|
 | SoC | Qualcomm IPQ5018 |
-| RAM | 512 MB DDR3 |
-| Flash | 128 MB SPI-NAND (ESMT F50L1G41LB) |
+| RAM | 512 MB |
+| Flash | 128 MB SPI-NAND |
 | Switch | Realtek RTL8367S-VB, **2.5G** HSGMII trunk on GMAC1 |
 | Ports | WAN + 4× LAN, all on the switch |
 | Wi-Fi 2.4 GHz | IPQ5018 integrated |
@@ -22,7 +22,7 @@ the part that is not: the NSS data path over a Realtek switch.
 
 ## Measured
 
-| | Mbit/s | router CPU |
+| Check | Mbit/s | router CPU |
 |---|---|---|
 | wired, routed both ways | 943 | ~2% |
 | Wi-Fi 5 GHz (160 MHz, HE-NSS 2, −50 dBm), AP → STA | 915 | 1–3% |
@@ -56,12 +56,9 @@ counters; they cannot carry a frame.
 ### The `930-*` patches
 
 RTL8367S-VB (family D) support for `rtl8365mb`, by **Mieczyslaw Nalewaj
-(@namiltd)**, taken unmodified from his [`Realtek_DSA2`][nam] branch. Family D
-moved the speed field, dropped the MC table, narrowed the FID mask and needs a
-different RGMII mux and a SerDes re-latch. Not mine — if they land upstream,
-drop them from here.
+(@namiltd)**, taken unmodified from his [`Realtek_DSA`][nam] branch.
 
-[nam]: https://github.com/namiltd/openwrt/tree/Realtek_DSA2/target/linux/generic/pending-6.18
+[nam]: https://github.com/namiltd/openwrt/tree/Realtek_DSA/target/linux/generic/pending-6.18
 
 ### The board DTS
 
@@ -81,8 +78,7 @@ nodes on the trunk carry `pause`.
 Without it phylink resolves the link as pauseless, `dwmac1000_flow_ctrl()`
 never sets `GMAC_FLOW_CTRL_RFE`, and the MAC discards the pause frames the
 switch is sending it — the switch then drops ~13% of a 400 Mbit/s stream on
-the 2.5G→1G step, with every NSS counter clean. It cost 466 Mbit/s of upstream
-Wi-Fi throughput here and took two days to find. Worth adding to any
+the 2.5G→1G step, with every NSS counter clean. Worth adding to any
 `fixed-link` faster than the front ports.
 
 ## Building
@@ -106,43 +102,6 @@ make -j$(nproc)
 the `DEVICE_DTS` line and the LuCI port wiring are patched into the branch's
 own files, so re-run it after every `git pull`.
 
-## Flashing
-
-The board is supported in OpenWrt main, so the usual route applies: TFTP an
-initramfs from U-Boot, then `sysupgrade`. Use `-n` only if you want the
-defaults back; without it the Wi-Fi config survives.
-
-After a `-n` flash the port netdevs need their uci entries, which no
-`uci-defaults` script can write — both `board.d` and `uci-defaults` run before
-netifd generates `/etc/config/network` from `board.json`:
-
-```sh
-for p in lan1 lan2 lan3 lan4; do uci add_list network.@device[0].ports=$p; done
-uci set network.brwan=device
-uci set network.brwan.name='br-wan'
-uci set network.brwan.type='bridge'
-uci add_list network.brwan.ports='eth0.2'
-uci add_list network.brwan.ports='wan'
-uci set network.wan.device='br-wan'
-uci set network.wan6.device='br-wan'
-uci commit network
-reboot
-```
-
-Without this the ports still show link, speed and counters; they just are not
-coloured by network in the status page.
-
-## Checking the offload
-
-```sh
-cat /sys/kernel/debug/qca-dwmac-nss/status
-# phys_if 1: started dev=eth0 fw_link=up
-# dma_status=00660004 rs=3 ts=6 ...        <- rs=3 ts=6 is the healthy one
-
-grep -E "ipv4_hash_hits|ipv4_create_requests" /sys/kernel/debug/qca-nss-drv/stats/ipv4
-nss_stats | grep -A6 "ATTACH 0"            # the QCN6122 on wifili
-ethtool eth0 | grep -i pause               # link partner advertised: Symmetric
-```
 
 ## Credits
 
