@@ -2,6 +2,9 @@
 
 This build is designed for the Realtek `RTL8367S-VB` switch (Family D, chip ID `0x6642`). It will therefore not work on the `RTL8367S` (Family C). Please bear this in mind.
 
+Please also bear in mind that this is a test version. It should by no means be considered FULLY FUNCTIONAL.
+At the moment, everything is working on my board and I haven’t encountered any major problems.
+
 # OpenWrt with NSS offload — TP-Link Archer AX55 v1 (IPQ5018)
 
 Everything needed to build @kuncy7's [`ipq50xx-rebase`][branch] for the Archer
