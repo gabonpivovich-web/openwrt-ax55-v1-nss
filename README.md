@@ -8,8 +8,8 @@ At the moment, everything is working on my board and I haven’t encountered any
 # OpenWrt with NSS offload — TP-Link Archer AX55 v1 (IPQ5018)
 
 Everything needed to build kuncy7's [`ipq50xx-rebase`][branch] for the Archer
-AX55 v1, plus a prebuilt image. The board is in OpenWrt main; what is here is
-the part that is not: the NSS data path over a Realtek switch.
+AX55 v1. The board is in OpenWrt main; what is here is the part that is not:
+the NSS data path over a Realtek switch.
 
 [branch]: https://github.com/kuncy7/openwrt-nss-edma/tree/ipq50xx-rebase
 
@@ -119,9 +119,11 @@ make menuconfig    # Target: Qualcomm Atheros IPQ50xx, Profile: TP-Link Archer A
 make -j$(nproc)
 ```
 
-`apply.sh` copies the files and prints what it changed. The board table entry,
-the `DEVICE_DTS` line and the LuCI port wiring are patched into the branch's
-own files, so re-run it after every `git pull`.
+`apply.sh` copies the two modules and the `930-*` patches, and applies one
+patch to the six files the board shares with the branch: the DTS, the board
+table, the image recipe, the LED case and two kernel configs. A patch rather
+than copies, so a `git pull` in the tree can merge them - but re-run it after
+every pull, and if the branch has moved under the patch it will say so.
 
 
 ## Credits
