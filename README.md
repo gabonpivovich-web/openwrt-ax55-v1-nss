@@ -40,7 +40,7 @@ Both radios run on wifili. Stock TP-Link firmware reaches the same figures.
 ## What is in here
 
 ```
-package/kernel/rtl8367s-nss/          the switch re-arm module
+package/kernel/rtl8367s-nss/          two modules: the re-arm, and the LEDs
 target/linux/generic/pending-6.18/    RTL8367S-VB family D support
 target/linux/qualcommax/              board DTS and board files
 apply.sh                              copies the above into a checked-out tree
@@ -55,10 +55,24 @@ back the force word, the VLAN table, the PVIDs, the egress mode, the learning
 limit and the front PHYs — everything the driver takes with it on the way out.
 It is the Realtek counterpart to `qca8337-nss` in the branch.
 
-It also registers a display-only `net_device` per front jack, so LuCI's port
-panel, the netdev LED triggers and the per-port counters have something to
-read. Those devices carry link state, negotiated speed and the switch's MIB
-counters; they cannot carry a frame.
+It does that in one pass and returns `-EAGAIN`, so it never stays resident,
+and it refuses anything but chip ID 0x6642 - a family C board is left alone.
+This half is upstream as [kuncy7/openwrt-nss-edma#5][pr].
+
+[pr]: https://github.com/kuncy7/openwrt-nss-edma/pull/5
+
+### `rtl8367s-leds`
+
+The cosmetics, in their own module because they are not needed to carry a
+frame. It polls the front PHYs to drive the case LEDs, and registers a
+display-only `net_device` per jack so LuCI's port panel, the netdev LED
+triggers and the per-port counters have something to read. Those devices
+carry link state, negotiated speed and the switch's MIB counters, and a
+stable MAC derived from the board's; they cannot carry a frame, and
+`ndo_start_xmit` drops and counts anything handed to them.
+
+It finds the switch itself rather than leaning on the re-arm module, so
+either can be left out.
 
 ### The `930-*` patches
 

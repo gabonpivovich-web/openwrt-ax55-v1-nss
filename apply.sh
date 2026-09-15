@@ -55,9 +55,9 @@ Done. Two things this cannot do for you:
   - .config. Run make menuconfig, pick
       Target System  -> Qualcomm Atheros IPQ50xx
       Target Profile -> TP-Link Archer AX55 v1
-    and check that kmod-rtl8367s-nss and the qca-nss-* packages are selected.
+    and check that kmod-rtl8367s-nss, kmod-rtl8367s-leds and the qca-nss-*
+    packages are selected.
 
-The tree's own ipq5018-archer-ax55-v1.dts is left alone; DEVICE_DTS in the
-patch points the build at ours, which carries the NSS node and the
-fixed-link pause.
+The DTS changes go into the tree's own ipq5018-archer-ax55-v1.dts - the
+fixed-link pause and the ath11k memory mode - rather than a second file.
 EOF
