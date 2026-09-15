@@ -77,7 +77,7 @@ either can be left out.
 ### The `930-*` patches
 
 RTL8367S-VB (family D) support for `rtl8365mb`, by **Mieczyslaw Nalewaj
-(@namiltd)**, taken unmodified from his [`Realtek_DSA`][nam] branch.
+(namiltd)**, taken unmodified from his [`Realtek_DSA`][nam] branch.
 
 [nam]: https://github.com/namiltd/openwrt/tree/Realtek_DSA/target/linux/generic/pending-6.18
 
