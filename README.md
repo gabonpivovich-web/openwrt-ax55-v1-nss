@@ -7,7 +7,7 @@ At the moment, everything is working on my board and I haven’t encountered any
 
 # OpenWrt with NSS offload — TP-Link Archer AX55 v1 (IPQ5018)
 
-Everything needed to build @kuncy7's [`ipq50xx-rebase`][branch] for the Archer
+Everything needed to build kuncy7's [`ipq50xx-rebase`][branch] for the Archer
 AX55 v1, plus a prebuilt image. The board is in OpenWrt main; what is here is
 the part that is not: the NSS data path over a Realtek switch.
 
