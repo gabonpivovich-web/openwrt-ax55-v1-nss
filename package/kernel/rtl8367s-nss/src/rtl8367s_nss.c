@@ -57,9 +57,6 @@
 #include <linux/workqueue.h>
 #include <linux/fs.h>
 #include <linux/array_size.h>
-#include <linux/etherdevice.h>
-#include <linux/ethtool.h>
-#include <linux/rtnetlink.h>
 
 #define REALTEK_MDIO_CTRL0_REG		31
 #define REALTEK_MDIO_CTRL1_REG		21
@@ -71,7 +68,11 @@
 #define REALTEK_MDIO_READ_OP		0x0001
 #define REALTEK_MDIO_WRITE_OP		0x0003
 
-#define RTL_SCRATCH_REG			0x13C2	/* SDS option arm key; 0 is its idle value */
+#define RTL_MAGIC_REG			0x13C2	/* 0 is its idle value; see rtl_chip_id() */
+#define RTL_MAGIC_VALUE			0x0249
+#define RTL_CHIP_ID_REG			0x1300
+#define RTL_CHIP_VER_REG		0x1301
+#define RTL_CHIP_ID_RTL8367S_VB		0x6642
 
 #define RTL_D_FORCE_BASE		0x12C0
 #define RTL_D_FORCE_EN_BASE		0x12C8
@@ -226,60 +227,6 @@ static bool cpu_tag_off = true;
 module_param(cpu_tag_off, bool, 0444);
 MODULE_PARM_DESC(cpu_tag_off, "disable CPU tag insertion on the trunk");
 
-/* Front-port link state has no netdev to hang off any more: DSA is gone
- * and the trunk is up whatever the jacks are doing. Poll BMSR on the
- * front PHYs instead and drive the case LEDs directly.
- */
-static char *led_lan = "green:lan";
-module_param(led_lan, charp, 0444);
-MODULE_PARM_DESC(led_lan, "LED lit while any LAN PHY has link, empty to disable");
-
-static char *led_lan_phys = "1,2,3,4";
-module_param(led_lan_phys, charp, 0444);
-
-static char *led_wan = "";
-module_param(led_wan, charp, 0444);
-MODULE_PARM_DESC(led_wan,
-		 "LED for WAN PHY link. Empty by default: wan-online-led owns\n"
-		 "both WAN LEDs, since only userspace can tell a live cable\n"
-		 "from a working uplink");
-
-static char *led_wan_phys = "0";
-module_param(led_wan_phys, charp, 0444);
-
-/* Exported so userspace can tell "cable in the jack" from "the other end
- * answers": with no per-port netdev there is nothing else to ask.
- */
-static int lan_link;
-module_param(lan_link, int, 0444);
-MODULE_PARM_DESC(lan_link, "read-only: 1 while any LAN PHY has link");
-
-static int wan_link;
-module_param(wan_link, int, 0444);
-MODULE_PARM_DESC(wan_link, "read-only: 1 while the WAN PHY has link");
-
-static char *port_map = "0:wan,1:lan1,2:lan2,3:lan3,4:lan4";
-module_param(port_map, charp, 0444);
-MODULE_PARM_DESC(port_map,
-		 "display-only netdevs to register, as switchport:name pairs;\n"
-		 "empty to register none");
-
-static char *base_mac;
-module_param(base_mac, charp, 0444);
-MODULE_PARM_DESC(base_mac,
-		 "MAC to derive the port netdev addresses from, usually the\n"
-		 "trunk's; empty gives each a random one, which changes on\n"
-		 "every boot");
-
-static int stats_ms = 2000;
-module_param(stats_ms, int, 0644);
-MODULE_PARM_DESC(stats_ms,
-		 "how often to sweep the MIB into the port netdevs, in ms");
-
-static int poll_ms = 1000;
-module_param(poll_ms, int, 0644);
-MODULE_PARM_DESC(poll_ms, "link poll interval in ms, 0 to disable the LEDs");
-
 static bool mib_dump;
 module_param(mib_dump, bool, 0444);
 MODULE_PARM_DESC(mib_dump,
@@ -336,7 +283,7 @@ static int rtl_read(u16 reg, u16 *val)
 	/* See the file header: a read only returns the addressed register
 	 * shortly after a write, so prime the interface with one.
 	 */
-	rtl_write(RTL_SCRATCH_REG, 0);
+	rtl_write(RTL_MAGIC_REG, 0);
 
 	mutex_lock(&rbus->mdio_lock);
 	rbus->write(rbus, sw_addr, REALTEK_MDIO_CTRL0_REG, REALTEK_MDIO_ADDR_OP);
@@ -350,6 +297,41 @@ static int rtl_read(u16 reg, u16 *val)
 
 	*val = ret;
 	return 0;
+}
+
+/* The chip ID and version registers only answer while the magic register
+ * holds 0x0249, which is also the register rtl_read() primes with - so the
+ * ordinary read path cannot see them, and this has to drive the bus itself.
+ * Same sequence as rtl8365mb_read_chip_id_and_ver().
+ */
+static int rtl_chip_id(u16 *id, u16 *ver)
+{
+	int ret;
+
+	*id = 0;
+	*ver = 0;
+
+	rtl_write(RTL_MAGIC_REG, RTL_MAGIC_VALUE);
+
+	mutex_lock(&rbus->mdio_lock);
+	rbus->write(rbus, sw_addr, REALTEK_MDIO_CTRL0_REG, REALTEK_MDIO_ADDR_OP);
+	rbus->write(rbus, sw_addr, REALTEK_MDIO_ADDRESS_REG, RTL_CHIP_ID_REG);
+	rbus->write(rbus, sw_addr, REALTEK_MDIO_CTRL1_REG, REALTEK_MDIO_READ_OP);
+	ret = rbus->read(rbus, sw_addr, REALTEK_MDIO_DATA_READ_REG);
+	if (ret >= 0) {
+		*id = ret;
+		rbus->write(rbus, sw_addr, REALTEK_MDIO_CTRL0_REG, REALTEK_MDIO_ADDR_OP);
+		rbus->write(rbus, sw_addr, REALTEK_MDIO_ADDRESS_REG, RTL_CHIP_VER_REG);
+		rbus->write(rbus, sw_addr, REALTEK_MDIO_CTRL1_REG, REALTEK_MDIO_READ_OP);
+		ret = rbus->read(rbus, sw_addr, REALTEK_MDIO_DATA_READ_REG);
+		if (ret >= 0)
+			*ver = ret;
+	}
+	mutex_unlock(&rbus->mdio_lock);
+
+	rtl_write(RTL_MAGIC_REG, 0);
+
+	return ret < 0 ? ret : 0;
 }
 
 /* Read with no priming write in front. Only valid immediately after a
@@ -767,118 +749,6 @@ static void rtl_pvid_program(void)
 	kfree(list);
 }
 
-/* ===== front-port link LEDs ===== */
-
-#define RTL_BMSR_LSTATUS	0x0004
-
-static struct delayed_work rtl_led_work;
-static int rtl_lan_last = -1;
-static int rtl_wan_last = -1;
-
-static void rtl_led_set(const char *led, int on)
-{
-	char path[96];
-	struct file *f;
-	loff_t pos = 0;
-	char v[2];
-
-	if (!led || !*led)
-		return;
-
-	snprintf(path, sizeof(path), "/sys/class/leds/%s/brightness", led);
-	f = filp_open(path, O_WRONLY, 0);
-	if (IS_ERR(f))
-		return;
-
-	v[0] = on ? '1' : '0';
-	v[1] = '\n';
-	kernel_write(f, v, 2, &pos);
-	filp_close(f, NULL);
-}
-
-/* BMSR latches link-down, so a single read can report a stale drop right
- * after one; read twice and take the second.
- */
-static int rtl_phy_has_link(int phy)
-{
-	u16 bmsr;
-
-	if (rtl_phy_read(phy, MII_BMSR, &bmsr))
-		return 0;
-	if (rtl_phy_read(phy, MII_BMSR, &bmsr))
-		return 0;
-
-	return !!(bmsr & RTL_BMSR_LSTATUS);
-}
-
-static int rtl_any_link(const char *spec)
-{
-	char *list, *tok, *p;
-	int phy, any = 0;
-
-	if (!spec || !*spec)
-		return -1;
-
-	list = kstrdup(spec, GFP_KERNEL);
-	if (!list)
-		return -1;
-
-	p = list;
-	while ((tok = strsep(&p, ",")) != NULL) {
-		if (!*tok)
-			continue;
-		if (kstrtoint(tok, 0, &phy) || phy < 0 || phy > 7)
-			continue;
-		if (rtl_phy_has_link(phy)) {
-			any = 1;
-			break;
-		}
-	}
-
-	kfree(list);
-	return any;
-}
-
-/* Defined with the port netdevs, below the MIB helpers it needs. */
-static void rtl_pnd_poll(void);
-
-static void rtl_led_poll(struct work_struct *w)
-{
-	int lan, wan;
-
-	if (!rbus)
-		return;
-
-	/* Four register reads a second is not something to narrate. */
-	rtl_quiet = true;
-
-	lan = rtl_any_link(led_lan_phys);
-	if (lan >= 0) {
-		lan_link = lan;
-		if (lan != rtl_lan_last) {
-			rtl_led_set(led_lan, lan);
-			rtl_lan_last = lan;
-		}
-	}
-
-	wan = rtl_any_link(led_wan_phys);
-	if (wan >= 0) {
-		wan_link = wan;
-		if (wan != rtl_wan_last) {
-			rtl_led_set(led_wan, wan);
-			rtl_wan_last = wan;
-		}
-	}
-
-	rtl_pnd_poll();
-
-	rtl_quiet = false;
-
-	if (poll_ms > 0)
-		schedule_delayed_work(&rtl_led_work,
-				      msecs_to_jiffies(poll_ms));
-}
-
 /* ===== MIB ===== */
 
 static int rtl_mib_read(int port, u32 offset, u32 length, u64 *out)
@@ -1013,335 +883,9 @@ static void rtl_l2_show(void)
 	pr_info("rtl8367s-nss: L2 %d unicast entries\n", found);
 }
 
-/* ===== Front-port netdevs =====
- *
- * One net_device per front jack, carrying that port's link state, speed and
- * MIB counters.  They are display-only: the data path is the trunk, and a
- * frame handed to one of these has nowhere to go, so ndo_start_xmit drops
- * it and counts it.  Do not bridge them.
- */
-
-#define RTL_PND_MAX		8
-
-struct rtl_pnd {
-	struct net_device	*ndev;
-	int			port;
-	int			phy;
-	int			speed;		/* SPEED_* or SPEED_UNKNOWN */
-	u8			duplex;		/* DUPLEX_* */
-	struct rtnl_link_stats64 stats;
-	spinlock_t		lock;		/* guards stats/speed/duplex */
-};
-
-static struct net_device *rtl_pnd_dev[RTL_PND_MAX];
-static int rtl_pnd_count;
-static int rtl_pnd_due;			/* ms left until the next sweep */
-
-static netdev_tx_t rtl_pnd_xmit(struct sk_buff *skb, struct net_device *dev)
-{
-	struct rtl_pnd *p = netdev_priv(dev);
-
-	/* tx_dropped, not tx_errors: nothing went wrong, the frame simply
-	 * has nowhere to go. The bridge hands one to every member port and
-	 * this one is a display, so a broadcast lands here on every hop.
-	 */
-	spin_lock(&p->lock);
-	p->stats.tx_dropped++;
-	spin_unlock(&p->lock);
-
-	dev_kfree_skb_any(skb);
-	return NETDEV_TX_OK;
-}
-
-static int rtl_pnd_open(struct net_device *dev)
-{
-	/* The poll sets the real state within poll_ms. */
-	netif_carrier_off(dev);
-	return 0;
-}
-
-static int rtl_pnd_stop(struct net_device *dev)
-{
-	netif_carrier_off(dev);
-	return 0;
-}
-
-static void rtl_pnd_get_stats64(struct net_device *dev,
-				struct rtnl_link_stats64 *out)
-{
-	struct rtl_pnd *p = netdev_priv(dev);
-
-	spin_lock(&p->lock);
-	*out = p->stats;
-	spin_unlock(&p->lock);
-}
-
-static const struct net_device_ops rtl_pnd_ops = {
-	.ndo_open		= rtl_pnd_open,
-	.ndo_stop		= rtl_pnd_stop,
-	.ndo_start_xmit		= rtl_pnd_xmit,
-	.ndo_get_stats64	= rtl_pnd_get_stats64,
-};
-
-static int rtl_pnd_get_ksettings(struct net_device *dev,
-				 struct ethtool_link_ksettings *cmd)
-{
-	struct rtl_pnd *p = netdev_priv(dev);
-
-	ethtool_link_ksettings_zero_link_mode(cmd, supported);
-	ethtool_link_ksettings_zero_link_mode(cmd, advertising);
-	ethtool_link_ksettings_add_link_mode(cmd, supported, TP);
-	ethtool_link_ksettings_add_link_mode(cmd, supported, Autoneg);
-	ethtool_link_ksettings_add_link_mode(cmd, supported, 10baseT_Full);
-	ethtool_link_ksettings_add_link_mode(cmd, supported, 100baseT_Full);
-	ethtool_link_ksettings_add_link_mode(cmd, supported, 1000baseT_Full);
-
-	cmd->base.port = PORT_TP;
-	cmd->base.autoneg = AUTONEG_ENABLE;
-
-	spin_lock(&p->lock);
-	cmd->base.speed = p->speed;
-	cmd->base.duplex = p->duplex;
-	spin_unlock(&p->lock);
-
-	return 0;
-}
-
-static void rtl_pnd_get_drvinfo(struct net_device *dev,
-				struct ethtool_drvinfo *info)
-{
-	strscpy(info->driver, "rtl8367s-nss", sizeof(info->driver));
-	strscpy(info->bus_info, "mdio", sizeof(info->bus_info));
-}
-
-static const struct ethtool_ops rtl_pnd_ethtool_ops = {
-	.get_link		= ethtool_op_get_link,
-	.get_link_ksettings	= rtl_pnd_get_ksettings,
-	.get_drvinfo		= rtl_pnd_get_drvinfo,
-};
-
-static void rtl_pnd_setup(struct net_device *dev)
-{
-	ether_setup(dev);
-	dev->netdev_ops = &rtl_pnd_ops;
-	dev->ethtool_ops = &rtl_pnd_ethtool_ops;
-	dev->needs_free_netdev = true;
-	dev->priv_flags |= IFF_NO_QUEUE;
-	dev->flags &= ~IFF_MULTICAST;
-}
-
-/* Resolve the link the PHY settled on.  Clause-22 only: the advertisement
- * both sides agreed on is the highest bit set in both our register and the
- * partner's.
- */
-static void rtl_pnd_read_link(struct rtl_pnd *p)
-{
-	u16 bmsr, lpa = 0, stat1000 = 0, ctrl1000 = 0;
-	int speed = SPEED_UNKNOWN;
-	u8 duplex = DUPLEX_UNKNOWN;
-
-	if (rtl_phy_read(p->phy, MII_BMSR, &bmsr) ||
-	    rtl_phy_read(p->phy, MII_BMSR, &bmsr))
-		goto out;
-
-	if (!(bmsr & RTL_BMSR_LSTATUS))
-		goto out;
-
-	rtl_phy_read(p->phy, MII_LPA, &lpa);
-	rtl_phy_read(p->phy, MII_STAT1000, &stat1000);
-	rtl_phy_read(p->phy, MII_CTRL1000, &ctrl1000);
-
-	if ((stat1000 & LPA_1000FULL) && (ctrl1000 & ADVERTISE_1000FULL)) {
-		speed = SPEED_1000;
-		duplex = DUPLEX_FULL;
-	} else if ((stat1000 & LPA_1000HALF) && (ctrl1000 & ADVERTISE_1000HALF)) {
-		speed = SPEED_1000;
-		duplex = DUPLEX_HALF;
-	} else if (lpa & LPA_100FULL) {
-		speed = SPEED_100;
-		duplex = DUPLEX_FULL;
-	} else if (lpa & LPA_100HALF) {
-		speed = SPEED_100;
-		duplex = DUPLEX_HALF;
-	} else if (lpa & LPA_10FULL) {
-		speed = SPEED_10;
-		duplex = DUPLEX_FULL;
-	} else if (lpa & LPA_10HALF) {
-		speed = SPEED_10;
-		duplex = DUPLEX_HALF;
-	}
-
-out:
-	spin_lock(&p->lock);
-	p->speed = speed;
-	p->duplex = duplex;
-	spin_unlock(&p->lock);
-
-	if (speed == SPEED_UNKNOWN) {
-		if (netif_carrier_ok(p->ndev))
-			netif_carrier_off(p->ndev);
-	} else if (!netif_carrier_ok(p->ndev)) {
-		netif_carrier_on(p->ndev);
-	}
-}
-
-static void rtl_pnd_read_mib(struct rtl_pnd *p)
-{
-	u64 in_oct, out_oct, rx_uc, rx_mc, rx_bc, tx_uc, tx_mc, tx_bc;
-
-	if (rtl_mib_read(p->port, RTL_MIB_IF_IN_OCTETS, 4, &in_oct) ||
-	    rtl_mib_read(p->port, RTL_MIB_IF_OUT_OCTETS, 4, &out_oct) ||
-	    rtl_mib_read(p->port, RTL_MIB_IF_IN_UCAST, 2, &rx_uc) ||
-	    rtl_mib_read(p->port, RTL_MIB_IF_IN_MCAST, 2, &rx_mc) ||
-	    rtl_mib_read(p->port, RTL_MIB_IF_IN_BCAST, 2, &rx_bc) ||
-	    rtl_mib_read(p->port, RTL_MIB_IF_OUT_UCAST, 2, &tx_uc) ||
-	    rtl_mib_read(p->port, RTL_MIB_IF_OUT_MCAST, 2, &tx_mc) ||
-	    rtl_mib_read(p->port, RTL_MIB_IF_OUT_BCAST, 2, &tx_bc))
-		return;
-
-	spin_lock(&p->lock);
-	p->stats.rx_bytes = in_oct;
-	p->stats.tx_bytes = out_oct;
-	p->stats.rx_packets = rx_uc + rx_mc + rx_bc;
-	p->stats.tx_packets = tx_uc + tx_mc + tx_bc;
-	p->stats.multicast = rx_mc;
-	spin_unlock(&p->lock);
-}
-
-/* Called from the LED poll, which already holds the switch quiet. */
-static void rtl_pnd_poll(void)
-{
-	bool sweep;
-	int i;
-
-	if (!rtl_pnd_count)
-		return;
-
-	rtl_pnd_due -= poll_ms > 0 ? poll_ms : 1000;
-	sweep = stats_ms > 0 && rtl_pnd_due <= 0;
-	if (sweep)
-		rtl_pnd_due = stats_ms;
-
-	for (i = 0; i < rtl_pnd_count; i++) {
-		struct rtl_pnd *p = netdev_priv(rtl_pnd_dev[i]);
-
-		/* ethtool and LuCI read nothing off a device that is
-		 * administratively down, and the init script cannot do this
-		 * for us: at START=15 /sbin/ip is still a symlink into an
-		 * overlay that is not there yet.
-		 */
-		if (!(rtl_pnd_dev[i]->flags & IFF_UP)) {
-			rtnl_lock();
-			dev_change_flags(rtl_pnd_dev[i],
-					 rtl_pnd_dev[i]->flags | IFF_UP, NULL);
-			rtnl_unlock();
-		}
-
-		rtl_pnd_read_link(p);
-		if (sweep)
-			rtl_pnd_read_mib(p);
-	}
-}
-
-static void rtl_pnd_unregister(void)
-{
-	int i;
-
-	for (i = 0; i < rtl_pnd_count; i++) {
-		if (rtl_pnd_dev[i])
-			unregister_netdev(rtl_pnd_dev[i]);
-		rtl_pnd_dev[i] = NULL;
-	}
-	rtl_pnd_count = 0;
-}
-
-static int rtl_pnd_add(int port, int phy, const char *name)
-{
-	struct net_device *ndev;
-	struct rtl_pnd *p;
-	u8 mac[ETH_ALEN];
-	int ret;
-
-	if (rtl_pnd_count >= RTL_PND_MAX)
-		return -ENOSPC;
-
-	ndev = alloc_netdev(sizeof(*p), name, NET_NAME_PREDICTABLE,
-			    rtl_pnd_setup);
-	if (!ndev)
-		return -ENOMEM;
-
-	/* A stable address, so the port list does not look new after every
-	 * reboot. The locally-administered bit and a last byte no real
-	 * interface here uses keep a display-only device from ever being
-	 * mistaken for one that forwards.
-	 */
-	if (base_mac && *base_mac && mac_pton(base_mac, mac)) {
-		mac[0] |= 0x02;
-		mac[ETH_ALEN - 1] = 0xF0 | (port & 0x0F);
-		eth_hw_addr_set(ndev, mac);
-	} else {
-		eth_hw_addr_random(ndev);
-	}
-
-	p = netdev_priv(ndev);
-	memset(p, 0, sizeof(*p));
-	spin_lock_init(&p->lock);
-	p->ndev = ndev;
-	p->port = port;
-	p->phy = phy;
-	p->speed = SPEED_UNKNOWN;
-	p->duplex = DUPLEX_UNKNOWN;
-
-	ret = register_netdev(ndev);
-	if (ret) {
-		free_netdev(ndev);
-		return ret;
-	}
-
-	netif_carrier_off(ndev);
-	rtl_pnd_dev[rtl_pnd_count++] = ndev;
-	return 0;
-}
-
-/* port_map is "switchport:name" pairs.  The PHY number equals the switch
- * port number on this part - the five jacks are its own internal PHYs 0-4.
- */
-static void rtl_pnd_register(void)
-{
-	char *list, *tok, *p, *colon;
-	int port, n = 0;
-
-	if (!port_map || !*port_map)
-		return;
-
-	list = kstrdup(port_map, GFP_KERNEL);
-	if (!list)
-		return;
-
-	p = list;
-	while ((tok = strsep(&p, ",")) != NULL) {
-		if (!*tok)
-			continue;
-		colon = strchr(tok, ':');
-		if (!colon || !colon[1])
-			continue;
-		*colon = '\0';
-		if (kstrtoint(tok, 0, &port) || port < 0 || port > 7)
-			continue;
-		if (rtl_pnd_add(port, port, colon + 1) == 0)
-			n++;
-	}
-
-	kfree(list);
-
-	if (n)
-		pr_info("rtl8367s-nss: %d port netdevs registered (display only)\n",
-			n);
-}
-
 static int __init rtl_nss_init(void)
 {
-	u16 val;
+	u16 chip_id, chip_ver;
 
 	rbus = mdio_find_bus(bus_id);
 	if (!rbus) {
@@ -1352,8 +896,15 @@ static int __init rtl_nss_init(void)
 	pr_info("rtl8367s-nss: bus %s addr 0x%02x trunk port %d%s\n",
 		bus_id, sw_addr, trunk_port, dry_run ? " (dry run)" : "");
 
-	if (!rtl_read(0x1300, &val))
-		pr_info("rtl8367s-nss: chip id 0x%04X\n", val);
+	if (rtl_chip_id(&chip_id, &chip_ver) || chip_id != RTL_CHIP_ID_RTL8367S_VB) {
+		pr_err("rtl8367s-nss: chip id 0x%04X ver 0x%04X is not an RTL8367S-VB, refusing\n",
+		       chip_id, chip_ver);
+		put_device(&rbus->dev);
+		rbus = NULL;
+		return -ENODEV;
+	}
+	pr_info("rtl8367s-nss: RTL8367S-VB, chip id 0x%04X ver 0x%04X\n",
+		chip_id, chip_ver);
 
 	if (l2_dump) {
 		rtl_l2_show();
@@ -1392,41 +943,19 @@ static int __init rtl_nss_init(void)
 	/* 5. the front PHYs phy_detach parked */
 	rtl_for_each(phys, 7, rtl_wake_phy);
 
-	/* With the LED poll enabled the module has to stay resident; the
-	 * bus reference goes with it. Without it there is nothing left to
-	 * do, so refuse to load and a rerun needs no rmmod.
-	 */
 	pr_info("rtl8367s-nss: switch re-armed: trunk port %d forced 0x%04X, VLANs %s\n",
 		trunk_port, force_val, vlans);
-
-	if (poll_ms > 0 && !dry_run) {
-		rtl_pnd_register();
-		INIT_DELAYED_WORK(&rtl_led_work, rtl_led_poll);
-		schedule_delayed_work(&rtl_led_work, 0);
-		pr_info("rtl8367s-nss: polling front-PHY link every %d ms\n",
-			poll_ms);
-		return 0;
-	}
 
 	put_device(&rbus->dev);
 	rbus = NULL;
 
+	/* Nothing is left to hold: the switch keeps what was written to it.
+	 * Refusing to load means a rerun needs no rmmod first.
+	 */
 	return -EAGAIN;
 }
 
-static void __exit rtl_nss_exit(void)
-{
-	cancel_delayed_work_sync(&rtl_led_work);
-	rtl_pnd_unregister();
-
-	if (rbus) {
-		put_device(&rbus->dev);
-		rbus = NULL;
-	}
-}
-
 module_init(rtl_nss_init);
-module_exit(rtl_nss_exit);
 
 MODULE_DESCRIPTION("Re-arm RTL8367S-VB after rtl8365mb teardown");
 MODULE_LICENSE("GPL");
